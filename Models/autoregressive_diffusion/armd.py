@@ -7,7 +7,7 @@ from einops import reduce
 from tqdm.auto import tqdm
 from functools import partial
 from Models.autoregressive_diffusion.linear import Linear
-from Models.autoregressive_diffusion.model_utils import default, identity, extract
+from Models.autoregressive_diffusion.model_utils import CausalSeriesDecomp, default, identity, extract
 
 
 # gaussian diffusion trainer class
@@ -52,15 +52,19 @@ class ARMD(nn.Module):
             attn_pd=0.,
             resid_pd=0.,
             w_grad=True,
+            trend_kernel=24,
+            season_kernel=7,
             **kwargs
     ):
         super(ARMD, self).__init__()
 
         self.eta = eta
         self.seq_length = seq_length
-        self.feature_size = feature_size
+        self.base_feature_size = feature_size
+        self.feature_size = feature_size * 3
 
         self.model = Linear(n_feat=feature_size, n_channel=seq_length, w_grad=w_grad, **kwargs)
+        self.decomp = CausalSeriesDecomp(trend_kernel=trend_kernel, season_kernel=season_kernel)
 
         if beta_schedule == 'linear':
             betas = linear_beta_schedule(timesteps)
@@ -215,7 +219,8 @@ class ARMD(nn.Module):
 
     def generate_mts(self, x):
         sample_fn = self.fast_sample if self.fast_sampling else self.sample
-        return sample_fn(x)
+        samples = sample_fn(self.decompose_components(x))
+        return self.recombine_components(samples)
 
     @property
     def loss_fn(self):
@@ -230,6 +235,14 @@ class ARMD(nn.Module):
         index = int(t[0])+1
         x_middle = x_start[:,pred_len-index:-index,:]
         return x_middle
+
+    def decompose_components(self, x):
+        trend, season, residual = self.decomp(x)
+        return torch.cat([trend, season, residual], dim=-1)
+
+    def recombine_components(self, x):
+        trend, season, residual = torch.split(x, self.base_feature_size, dim=-1)
+        return trend + season + residual
 
     def _train_loss(self, x_start, t, target=None, noise=None, training=True):
         noise = default(noise, lambda: torch.randn_like(x_start))
@@ -251,6 +264,8 @@ class ARMD(nn.Module):
 
     def forward(self, x, **kwargs):
         b, c, n, device, feature_size, = *x.shape, x.device, self.feature_size
+        x = self.decompose_components(x)
+        n = x.shape[-1]
         assert n == feature_size, f'number of variable must be {feature_size}'
         t = torch.randint(0, self.num_timesteps, (1,), device=device).repeat(b).long()
         return self._train_loss(x_start=x, t=t, **kwargs)

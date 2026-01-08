@@ -139,6 +139,39 @@ class series_decomp_multi(nn.Module):
         return res, moving_mean 
 
 
+class CausalMovingAvg(nn.Module):
+    """Causal moving average that only uses current and past values."""
+    def __init__(self, kernel_size):
+        super().__init__()
+        if kernel_size < 1:
+            raise ValueError("kernel_size must be >= 1")
+        self.kernel_size = kernel_size
+
+    def forward(self, x):
+        x = x.permute(0, 2, 1)
+        padding = (self.kernel_size - 1, 0)
+        x = F.pad(x, padding, mode='replicate')
+        batch, channels, _ = x.shape
+        weight = x.new_ones(channels, 1, self.kernel_size)
+        weight = weight / self.kernel_size
+        x = F.conv1d(x, weight, groups=channels)
+        return x.permute(0, 2, 1)
+
+
+class CausalSeriesDecomp(nn.Module):
+    """Causal series decomposition into trend, seasonal, and residual parts."""
+    def __init__(self, trend_kernel, season_kernel):
+        super().__init__()
+        self.trend_avg = CausalMovingAvg(trend_kernel)
+        self.season_avg = CausalMovingAvg(season_kernel)
+
+    def forward(self, x):
+        trend = self.trend_avg(x)
+        detrended = x - trend
+        season = self.season_avg(detrended)
+        residual = detrended - season
+        return trend, season, residual
+
 class Transpose(nn.Module):
     """ Wrapper class of torch.transpose() for Sequential module. """
     def __init__(self, shape: tuple):
